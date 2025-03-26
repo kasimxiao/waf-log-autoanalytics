@@ -1,4 +1,4 @@
-# WAF日志自动分析系统
+WAF
 
 这是一个基于AWS WAF日志的自动分析系统，用于检测和处理异常访问行为。
 
@@ -22,7 +22,7 @@
 ## 项目结构
 ```
 waf_automation/
-├── Lambda    
+├── Lambda
 ├──── lambda_function.py        # AWS Lambda函数入口
 ├──── waf_handler.py            # WAF操作处理模块
 ├──── opensearch_handler.py     # OpenSearch查询处理模块
@@ -57,15 +57,15 @@ waf_automation/
 
 
 ## 方案优势
-- 智能分析能力 
+- 智能分析能力
  - - 运用数据分析技术，快速从海量 WAF 日志中精准定位异常行为
  - - 借助LLM的强大语义理解能力，实现对复杂攻击行为的智能识别
  - - 通过多维度特征分析，有效提取攻击特征，提升检测准确率
-- 自动化响应机制 
+- 自动化响应机制
  - - 基于 AWS WAF SDK 实现防护规则的自动化配置与更新
  - - 建立动态的封禁-解封机制，确保防护策略的灵活性
  - - 支持人工审核与自动处置双模式切换，满足不同场景需求
-- 运维效能提升 
+- 运维效能提升
  - - 显著降低安全运维人员的工作负载
  - - 加快异常行为的发现、分析和处置流程
  - - 提供可视化的分析结果，辅助决策制定
@@ -77,7 +77,7 @@ waf_automation/
 - 配置WAF
  - - WAF 配置
  - - IP set 配置
- - - Rules Group 配置 
+ - - Rules Group 配置
 - 部署LogHub Solution，并配置采集管道将WAF日志采集到OpenSearch
  - - https://aws-solutions.github.io/centralized-logging-with-opensearch/zh/
 - SNS 配置
@@ -143,5 +143,3 @@ topic_arn = arn:aws:sns:region:accountid:snsname  # SNS主题ARN
 - 邮件通知
 - 查看WAF规则组更新
 - mysql查询执行日志
-
-
