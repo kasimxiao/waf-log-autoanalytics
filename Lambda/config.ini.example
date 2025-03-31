@@ -1,0 +1,48 @@
+[block_rulues_list]
+descript = 获取被阻止后仍然高频访问的IP，写入black ip set
+type = SQL
+query = SELECT httpRequest.clientIp, ja3Fingerprint, httpRequest.country, terminatingRuleId, terminatingRuleMatchDetails.location, count(*) as cnt
+      FROM ${table_name}
+      WHERE action = "BLOCK"
+      and timestamp >= date_sub(now(), interval 5 day)
+      GROUP BY httpRequest.clientIp,httpRequest.country,terminatingRuleId,terminatingRuleMatchDetails.location
+      HAVING COUNT(*) > 20
+      ORDER by cnt Desc
+
+[allow_multija3_list]
+descript = 获取多个ip使用相同ja3，告警处理/写入waf acl
+type = SQL
+query = SELECT ja3Fingerprint, count(distinct httpRequest.clientIp) as cnt
+      FROM ${table_name}
+      WHERE action = "ALLOW"
+      AND timestamp >= date_sub(now(), interval 90 day)
+      AND  ja3Fingerprint is not null
+      GROUP BY ja3Fingerprint
+      HAVING COUNT(distinct httpRequest.clientIp) > 10
+      ORDER by cnt Desc
+
+[aos-config]
+host = host
+service = es
+user = admin
+pwd = pwd
+table_name = waf-sample-waf
+
+[mysql-config]
+host = host
+user = admin
+pwd = pwd
+database = waf
+
+[waf-config]
+ipset_name = blackip
+ipset_region = CLOUDFRONT
+ipset_id = wafipsetid
+group_name = ja3
+group_id = wafgroupid
+
+[sns]
+topic_arn = arn:aws:sns:region:accountid:snsname
+
+[dashboard]
+dashboard_url = quicksighturl
