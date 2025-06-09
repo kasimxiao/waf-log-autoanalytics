@@ -1,10 +1,11 @@
+#以下SQL可以修改：查询时间段、获取统计条件
 [block_rulues_list]
 descript = 获取被阻止后仍然高频访问的IP，写入black ip set
 type = SQL
 query = SELECT httpRequest.clientIp, ja3Fingerprint, httpRequest.country, terminatingRuleId, terminatingRuleMatchDetails.location, count(*) as cnt
-      FROM ${table_name}
+      FROM {table_name}
       WHERE action = "BLOCK"
-      and timestamp >= date_sub(now(), interval 5 day)
+      and timestamp >= date_sub(now(), interval 15 MINUTE)
       GROUP BY httpRequest.clientIp,httpRequest.country,terminatingRuleId,terminatingRuleMatchDetails.location
       HAVING COUNT(*) > 20
       ORDER by cnt Desc
@@ -13,14 +14,149 @@ query = SELECT httpRequest.clientIp, ja3Fingerprint, httpRequest.country, termin
 descript = 获取多个ip使用相同ja3，告警处理/写入waf acl
 type = SQL
 query = SELECT ja3Fingerprint, count(distinct httpRequest.clientIp) as cnt
-      FROM ${table_name}
+      FROM {table_name}
       WHERE action = "ALLOW"
-      AND timestamp >= date_sub(now(), interval 90 day)
+      AND timestamp >= date_sub(now(), interval 15 MINUTE)
       AND  ja3Fingerprint is not null
       GROUP BY ja3Fingerprint
       HAVING COUNT(distinct httpRequest.clientIp) > 10
       ORDER by cnt Desc
 
+
+[allow_multija3_detail]
+descript = 对multija3调用情况进行分析
+type = DSL
+index = {table_name}
+query = {
+        "size": 100,
+        "_source": [
+          "httpRequest.clientIp",
+          "ja3Fingerprint",
+          "httpRequest.headers",
+          "httpRequest.args",
+          "httpRequest.uri",
+          "timestamp"
+        ],
+        "query": {
+          "bool": {
+            "filter": [
+              { "term": { "action": "ALLOW" }},
+              { "terms": { "ja3Fingerprint.keyword": ["3b5074b1b5d032e5620f69f9f700ff0e", "27441b2a2ac1d51a7f98ae44819494a5"] }},
+              { "range": { "timestamp": { "gte": "now-15m" }}}
+            ]
+          }
+        },
+        "collapse": {
+          "field": "ja3Fingerprint.keyword",
+          "inner_hits": {
+            "name": "by_ja3",
+            "size": 10,
+            "sort": [{"timestamp": "desc"}]
+          }
+        },
+        "sort": [
+          {
+            "ja3Fingerprint.keyword": "desc"
+          },
+          {
+            "timestamp": "desc"
+          }
+        ]
+      }
+system_prompt = 你是一位资深网络安全专家，对网络访问WAF日志进行分析
+user_prompt = 你是一位资深网络安全专家，content中内容为在opensearch中保存了在一个时间段内相同的ja3Fingerprint对应多个不同 IP 的请求日志，其中包括了IP、Headers、ARGS、URI、timestamp这几类信息;
+        需要根据‹rules>标签的的要求对日志内容进行分析，识别出疑似异常访问请求，按照‹result>标签要求结果进行输出
+        ‹rules>
+        HTTP Header异常检测,包括但不限于Referer字段完整性与合法性验证、重复请求头与参数冲突检测、非标准或恶意命名规则识别、自定义头部字段异常模式分析；
+        User-Agent行为特征分析，包括但不限于爬虫特征识别与分类、伪造UA字符串检测、异常请求模式识别、自动化工具特征匹配；
+        URI/ARGS安全威胁分析，包括但不限于SQL注入攻击特征识别、XSS攻击向量检测、异常字符编码序列识别、批量资源访问模式检测、敏感路径探测行为分析；
+        需要排除以下异常识别：
+          1.clientIp,信誉度;
+          2.user-agent 未识别的更新的版本号
+        </rules>
+        ‹result>
+        如果所有分析均正常，返回“检测正常”四个字即可，严禁任何多余内容的输出；
+        如果所有分析存在异常，返回“检测异常”，针对存在异常数据，严格遵循以 python list 格式按照<output>输出，需要多次核对是否为标准的list格式，严禁展开做任何多余分析，禁止进行最后的总结分析；
+        </result>
+        <output>
+        [[JA3,异常部分原始内容,异常描述,异常分类,建议处理方式],[JA3,异常部分原始内容,异常描述,异常分类,建议处理方式]]
+        </output>
+        content:
+
+
+[allow_iprate_list]
+descript = 获取高频访问的IP，以进行进一步分析
+type = SQL
+query = SELECT httpRequest.clientIp, count(*) as cnt
+      FROM {table_name}
+      WHERE action = "ALLOW"
+      AND timestamp >= date_sub(now(), interval 15 MINUTE)
+      GROUP BY httpRequest.clientIp
+      HAVING COUNT(*) > 10
+      ORDER by cnt Desc
+next_step = allow_request_detail
+
+[allow_request_detail]
+descript = 获取高频访问的IP，以进行进一步分析
+type = DSL
+index = {table_name}
+query = {
+        "size": 0,
+        "query": {
+          "bool": {
+            "filter": [
+              { "term": { "action": "ALLOW" }},
+              { "terms": { "httpRequest.clientIp": ["35.172.194.230","47.122.48.75"] }},
+              { "range": { "timestamp": { "gte": "now-15m" }}}
+            ]
+          }
+        },
+        "aggs": {
+          "by_ip": {
+            "terms": {
+              "field": "httpRequest.clientIp",
+              "size": 100,
+              "order": { "_key": "desc" }
+            },
+            "aggs": {
+              "top_hits": {
+                "top_hits": {
+                  "size": 10,
+                  "_source": [
+                    "httpRequest.clientIp",
+                    "httpRequest.headers",
+                    "httpRequest.args",
+                    "httpRequest.uri",
+                    "timestamp"
+                  ],
+                  "sort": [{ "timestamp": "desc" }]
+                }
+              }
+            }
+          }
+        }
+      }
+system_prompt = 你是一位资深网络安全专家，对网络访问WAF日志进行分析
+user_prompt = 你是一位资深网络安全专家，对网络访问WAF日志进行分析，content中内容为在opensearch中保存了高频访问的ip请求日志，其中包括了IP、Headers、ARGS、URI这几类信息，
+        需要根据‹rules>标签的的要求对日志内容进行分析，识别出疑似异常访问请求，按照‹result>标签要求结果进行输出
+        ‹rules>
+        HTTP Header异常检测,包括但不限于Referer字段完整性与合法性验证、重复请求头与参数冲突检测、非标准或恶意命名规则识别、自定义头部字段异常模式分析；
+        User-Agent行为特征分析，包括但不限于爬虫特征识别与分类、伪造UA字符串检测、异常请求模式识别、自动化工具特征匹配；
+        URI/ARGS安全威胁分析，包括但不限于SQL注入攻击特征识别、XSS攻击向量检测、异常字符编码序列识别、批量资源访问模式检测、敏感路径探测行为分析；
+        需要排除以下异常识别：
+          1.clientIp,信誉度;
+          2.user-agent 未识别的更新的版本号
+        </rules>
+        ‹result>
+        如果所有分析均正常，返回“检测正常”四个字即可，严禁任何多余内容的输出；
+        如果所有分析存在异常，返回“检测异常”，针对存在异常数据，严格遵循以 python list 格式按照<output>输出，需要多次核对是否为标准的list格式，严禁展开做任何多余分析，禁止进行最后的总结分析；
+        </result>
+        <output>
+        [[IP,异常部分原始内容,异常描述,异常分类,建议处理方式],[IP,异常部分原始内容,异常描述,异常分类,建议处理方式]]
+        </output>
+        content:
+
+###以下按自己环境配置修改###
 [aos-config]
 host = host
 service = es
