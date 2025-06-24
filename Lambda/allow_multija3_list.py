@@ -27,18 +27,16 @@ def query_aos(task_name, parameters=None):
     cf = read_config()
     query_string = cf.get(task_name, 'query')
     query_type = cf.get(task_name, 'type')
-
-    # 替换查询中的table_name变量
-    table_name = get_table_name()
-    query_string = query_string.replace('${table_name}', table_name)
-
+    print(task_name)
     if task_name == 'allow_multija3_detail':
-        query_json = json.loads(query_string)
-        for item in query_json['query']['bool']['filter']:
-            if 'terms' in item and 'ja3Fingerprint.keyword' in item['terms']:
-                item['terms']['ja3Fingerprint.keyword'] = parameters
-                break
-        query_string = json.dumps(query_json, indent=2)
+        # query_json = json.loads(query_string)
+        # for item in query_json['query']['bool']['filter']:
+        #     if 'terms' in item and 'ja3Fingerprint.keyword' in item['terms']:
+        #         item['terms']['ja3Fingerprint.keyword'] = parameters
+        #         break
+        
+        ja3_list = '("' + '", "'.join(parameters) + '")'
+        query_string = query_string.replace('{ja3_list}', ja3_list)
 
     if query_type == 'SQL':
         result = querySQL(query_string)
@@ -49,21 +47,20 @@ def query_aos(task_name, parameters=None):
     return result
 
 def process_dsl_results(response):
-    results = []
-    hits = response['hits']['hits']
-    for i in hits:
-        inner_hits = i['inner_hits']['by_ja3']['hits']['hits']
-        for hit in  inner_hits:
-            detail_list = []
-            detail_list.append(hit['_source']['ja3Fingerprint'])
-            detail_list.append(hit['_source']['httpRequest']['clientIp'])
-            detail_list.append(hit['_source']['httpRequest']['headers'])
-            detail_list.append(hit['_source']['httpRequest']['args'])
-            detail_list.append(hit['_source']['httpRequest']['uri'])
-            results.append(detail_list)
-    print('results')
-    print(len(results))
-    return results
+    # results = []
+    # hits = response['hits']['hits']
+    # for i in hits:
+    #     inner_hits = i['inner_hits']['by_ja3']['hits']['hits']
+    #     for hit in  inner_hits:
+    #         detail_list = []
+    #         detail_list.append(hit['_source']['ja3Fingerprint'])
+    #         detail_list.append(hit['_source']['httpRequest']['clientIp'])
+    #         detail_list.append(hit['_source']['httpRequest']['headers'])
+    #         detail_list.append(hit['_source']['httpRequest']['args'])
+    #         detail_list.append(hit['_source']['httpRequest']['uri'])
+    #         results.append(detail_list)
+    
+    return response
 
 def extract_array(text):
     # 使用正则表式匹配 '[' 和 ']' 之间的内容（包括嵌套的方括号）
@@ -80,40 +77,34 @@ def task_excute():
     #获取相同JA3 覆盖了多个IP
     ja3_result = query_aos(task_name)
     
-    # if len(ja3_result) == 0:
-    #     return message
+    if len(ja3_result) == 0:
+        return message
 
     task_name = 'allow_multija3_detail'
     system_prompt = cf.get(task_name, 'system_prompt')
     user_prompt = cf.get(task_name, 'user_prompt')
     ja3_list = []
-    # for i in ja3_result:
-    #     ja3_list.append(i[0])
-    # detail_result = query_aos(task_name,ja3_list)
-    
+    for i in ja3_result:
+        ja3_list.append(i[0])
+
+    #print(f'JA3list:{ja3_list}')
+    detail_result = query_aos(task_name,ja3_list)
+    #print(f'detail_result:{detail_result}')
     #测试代码
-    with open('ja3.json') as json_data:
-        detail_result = json.load(json_data)
+    # with open('test/ja3.json') as json_data:
+    #     detail_result = json.load(json_data)
     
     #转化为数组，减小token input
     detail_list = process_dsl_results(detail_result)
-    print('detail_result')
-    print(detail_list)
-    user_prompt=f'{user_prompt}/n{detail_result}'
-    # user_message =  {"role": "user", "content": prompt}
-    # assistant_message =  {"role": "assistant", "content": "检测"}
-    # messages = [user_message,assistant_message]
-    # response = generate_message(messages)
-
+    user_prompt=f'{user_prompt}/n{detail_list}'
     response = generate_message(system_prompt,user_prompt,'检测')
-    print('response')
-    print(response)
-    if '巡检正常' in f'巡检{response}':
+
+    if '检测正常' in f'检测{response}':
         return message
+    
+    # print(f'检测{response}')
 
     exception_result = extract_array(response)
-    print('exception_result')
-    print(exception_result)
     exception_list = eval(exception_result)
 
     seen = set()  # 用于去重
@@ -137,8 +128,9 @@ def task_excute():
     # 获取XX时间段内异常ja3
     ja3_result = get_ja3_exception_list()
     ja3_list =  [item[0] for item in ja3_result]
-
+    print(f'ja3_list:{ja3_list}')
     #更新 waf group
     # add_rule_to_group(ja3_list)
     update_rule_to_group(ja3_list)
     return message
+

@@ -75,7 +75,7 @@ def generate_message(system_prompt,user_prompt,assistant_content):
     response = run_multi_modal_prompt(system, messages, model_id)
     print('getInfoInsight')
     print(response["usage"]["inputTokens"],response["usage"]["outputTokens"])
-    return f'巡检{response["output"]["message"]["content"][0]["text"]}'
+    return f'检测{response["output"]["message"]["content"][0]["text"]}'
 
 
 bedrock_client = boto3.client(service_name='bedrock-runtime',region_name='us-west-2')

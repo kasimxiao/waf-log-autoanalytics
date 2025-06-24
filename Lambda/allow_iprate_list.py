@@ -23,17 +23,18 @@ def query_aos(task_name, parameters=None):
     query_string = cf.get(task_name, 'query')
     query_type = cf.get(task_name, 'type')
 
-    # 替换查询中的table_name变量
-    table_name = get_table_name()
-    query_string = query_string.replace('${table_name}', table_name)
-
     if task_name == 'allow_request_detail':
         query_json = json.loads(query_string)
         for item in query_json['query']['bool']['filter']:
             if 'terms' in item and 'httpRequest.clientIp' in item['terms']:
                 item['terms']['httpRequest.clientIp'] = parameters
                 break
+
         query_string = json.dumps(query_json, indent=2)
+        # result = queryDSL(query_json)
+        # ip_list = '("' + '", "'.join(parameters) + '")'
+        # query_string = query_string.replace('{ip_list}', ip_list)
+        # result = querySQL(query_string)
 
     if query_type == 'SQL':
         result = querySQL(query_string)
@@ -45,15 +46,31 @@ def query_aos(task_name, parameters=None):
 
 def process_dsl_results(response):
     results = []
-    hits = response['hits']['hits']
-    for hit in hits:
-        detail_list = []
-        detail_list.append(hit['_source']['httpRequest']['clientIp'])
-        detail_list.append(hit['_source']['httpRequest']['headers'])
-        detail_list.append(hit['_source']['httpRequest']['args'])
-        detail_list.append(hit['_source']['httpRequest']['uri'])
-        results.append(detail_list)
+    
+    # 获取所有IP桶
+    ip_buckets = response['aggregations']['by_ip']['buckets']
+
+    # 遍历每个IP桶
+    for ip_bucket in ip_buckets:
+        # 获取IP地址
+        ip = ip_bucket['key']
+        
+        # 获取top_hits中的所有命中
+        hits = ip_bucket['top_hits']['hits']['hits']
+        
+        # 遍历每个命中
+        for hit in hits:
+            if '_source' in hit and 'httpRequest' in hit['_source']:
+                detail_list = []
+                http_request = hit['_source']['httpRequest']
+                detail_list.append(http_request.get('clientIp'))
+                detail_list.append(http_request.get('headers'))
+                detail_list.append(http_request.get('args'))
+                detail_list.append(http_request.get('uri'))
+                
+                results.append(detail_list)
     return results
+
 
 def extract_array(text):
     # 使用正则表式匹配 '[' 和 ']' 之间的内容（包括嵌套的方括号）
@@ -72,39 +89,33 @@ def task_excute():
     ip_list = []
     for i in highrate_result:
         ip_list.append(i[0])
-
-    # if len(highrate_result) == 0:
-    #     return message
+    print(f'IPlist:{ip_list}')
+    
+    if len(highrate_result) == 0:
+        return message
 
     task_name = 'allow_request_detail'
     system_prompt = cf.get(task_name, 'system_prompt')
     user_prompt = cf.get(task_name, 'user_prompt')
+
     detail_result = query_aos(task_name,ip_list)
 
     #测试代码
-    with open('ip.json') as json_data:
-        detail_result = json.load(json_data)
+    # with open('test/ip.json') as json_data:
+    #     detail_result = json.load(json_data)
     
     #转化为数组，减小token input
     detail_list = process_dsl_results(detail_result)
     user_prompt=f'{user_prompt}/n{detail_result}'
-    # user_message =  {"role": "user", "content": prompt}
-    # assistant_message =  {"role": "assistant", "content": "检测"}
-    # messages = [user_message,assistant_message]
-    # response = generate_message(messages)
 
     response = generate_message(system_prompt,user_prompt,'检测')
-
-
     print(response)
 
-    if '巡检正常' in f'巡检{response}':
+    if '检测正常' in f'检测{response}':
         return message
         
     # exception_result = response.replace('异常','')
     exception_result = extract_array(response)
-    print('exception_result')
-    print(exception_result)
 
     exception_list = eval(exception_result)
     #写入数据库
@@ -122,3 +133,4 @@ def task_excute():
         message = f'以下IP存在高频请求，经分析疑似为恶意请求，请进行进一步分析\n{exception_string}\n'
 
     return message
+

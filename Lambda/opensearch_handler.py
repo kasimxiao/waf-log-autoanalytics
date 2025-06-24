@@ -19,14 +19,13 @@ def replace_variables(query):
     替换查询中的变量
     """
     table_name = get_table_name()
-    return query.replace('${table_name}', table_name)
+    return query.replace('{table_name}', table_name)
 
 def querySQL(query):
     """
     执行SQL查询
     """
     query = replace_variables(query)
-    
     response = es.transport.perform_request(
         'POST',
         '/_plugins/_sql',

@@ -26,10 +26,6 @@ def query_aos(task_name):
     cf = read_config()
     query_string = cf.get(task_name, 'query')
     query_type = cf.get(task_name, 'type')
-    
-    # 替换查询中的table_name变量
-    table_name = get_table_name()
-    query_string = query_string.replace('${table_name}', table_name)
 
     if query_type == 'SQL':
         result = querySQL(query_string)
@@ -44,8 +40,6 @@ def task_excute():
     message = ''
     #获取block后仍然大量请求的ip
     block_result = query_aos(task_name)
-    print('block_result:')
-    print(block_result)
 
     ip_string = ''
     for i in block_result:
@@ -53,7 +47,6 @@ def task_excute():
         insert_block_history(i)
         #ip写入/更新 mysql block_ip_set表
         insert_new_blockips(i[0],i[1])
-        print(i[0],i[1])
         ip_string = f'{ip_string}\n{i[0]}\t{i[3]}'
 
     #更新waf block ip
@@ -61,15 +54,16 @@ def task_excute():
 
     #获取mysql block ip 3天内的被阻止的 ip
     blockip_list = get_allblock_ips()
-    print(blockip_list)
 
     #更新waf ip set
     ip_list = []
     for i in blockip_list:
         ip_list.append(i[0]+'/32')
+    print(f'blockip:{ip_list}')
     update_waf_ip_set(ip_list)
     
     if len(ip_string) > 0:
         message = f'以下IP在Block后仍然产生大量请求，将被接入更名单池进行封禁{ip_string}\n'
 
     return message
+
