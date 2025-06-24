@@ -34,7 +34,7 @@ dashboard_url = cf.get('dashboard', 'dashboard_url')
 def lambda_handler(event, context):
     message = ''
     #被block后仍然高频访问的IP，写入black ip set，可配置XX天后自动移除
-    message = block_rules_list.task_excute()
+    # message = block_rules_list.task_excute()
 
     #同一个JA3，不同的ip使用，将ja3加入waf group rules，保留最近的XX条
     message = f'{message}\n\n{allow_multija3_list.task_excute()}'
@@ -49,3 +49,4 @@ def lambda_handler(event, context):
     return {
         'statusCode': 200,
     }
+

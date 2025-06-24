@@ -1,97 +1,144 @@
-import opensearch_handler
-import waf_handler
-import mysql_handler
+from opensearch_handler import querySQL, queryDSL, get_table_name
 import configparser
 import json
+from waf_handler import (
+    add_rule_to_group,
+    update_rule_to_group
+)
+from claude_handler import generate_message
+from mysql_handler import (
+    insert_exception_detail,
+    get_ja3_exception_list
+)
+import ast
+import re
 
-# 读取配置文件
+# 读取配置文件 
 def read_config():
     cf = configparser.ConfigParser()
-    cf.read('config.ini', encoding="utf-8")
+    cf.read('config.ini', encoding="utf-8")  # 读取config.ini
     return cf
 
-cf = read_config()
+def query_aos(task_name, parameters=None):
+    """
+    执行OpenSearch查询
+    使用配置文件中的查询语句和类型
+    """
+    cf = read_config()
+    query_string = cf.get(task_name, 'query')
+    query_type = cf.get(task_name, 'type')
+
+    # 替换查询中的table_name变量
+    table_name = get_table_name()
+    query_string = query_string.replace('${table_name}', table_name)
+
+    if task_name == 'allow_multija3_detail':
+        query_json = json.loads(query_string)
+        for item in query_json['query']['bool']['filter']:
+            if 'terms' in item and 'ja3Fingerprint.keyword' in item['terms']:
+                item['terms']['ja3Fingerprint.keyword'] = parameters
+                break
+        query_string = json.dumps(query_json, indent=2)
+
+    if query_type == 'SQL':
+        result = querySQL(query_string)
+    else:
+        # DSL查询使用配置的table_name
+        result = queryDSL(query_string)
+
+    return result
+
+def process_dsl_results(response):
+    results = []
+    hits = response['hits']['hits']
+    for i in hits:
+        inner_hits = i['inner_hits']['by_ja3']['hits']['hits']
+        for hit in  inner_hits:
+            detail_list = []
+            detail_list.append(hit['_source']['ja3Fingerprint'])
+            detail_list.append(hit['_source']['httpRequest']['clientIp'])
+            detail_list.append(hit['_source']['httpRequest']['headers'])
+            detail_list.append(hit['_source']['httpRequest']['args'])
+            detail_list.append(hit['_source']['httpRequest']['uri'])
+            results.append(detail_list)
+    print('results')
+    print(len(results))
+    return results
+
+def extract_array(text):
+    # 使用正则表式匹配 '[' 和 ']' 之间的内容（包括嵌套的方括号）
+    pattern = r'\[.*\]'
+    match = re.search(pattern, text, re.DOTALL)  # re.DOTALL 允许匹配换行符
+    if match:
+        return match.group()
+    return ''
 
 def task_excute():
-    try:
-        # 获取配置参数
-        query = cf.get('allow_multija3_list', 'query')
+    cf = read_config()
+    task_name = 'allow_multija3_list'
+    message = ''
+    #获取相同JA3 覆盖了多个IP
+    ja3_result = query_aos(task_name)
+    
+    # if len(ja3_result) == 0:
+    #     return message
+
+    task_name = 'allow_multija3_detail'
+    system_prompt = cf.get(task_name, 'system_prompt')
+    user_prompt = cf.get(task_name, 'user_prompt')
+    ja3_list = []
+    # for i in ja3_result:
+    #     ja3_list.append(i[0])
+    # detail_result = query_aos(task_name,ja3_list)
+    
+    #测试代码
+    with open('ja3.json') as json_data:
+        detail_result = json.load(json_data)
+    
+    #转化为数组，减小token input
+    detail_list = process_dsl_results(detail_result)
+    print('detail_result')
+    print(detail_list)
+    user_prompt=f'{user_prompt}/n{detail_result}'
+    # user_message =  {"role": "user", "content": prompt}
+    # assistant_message =  {"role": "assistant", "content": "检测"}
+    # messages = [user_message,assistant_message]
+    # response = generate_message(messages)
+
+    response = generate_message(system_prompt,user_prompt,'检测')
+    print('response')
+    print(response)
+    if '巡检正常' in f'巡检{response}':
+        return message
+
+    exception_result = extract_array(response)
+    print('exception_result')
+    print(exception_result)
+    exception_list = eval(exception_result)
+
+    seen = set()  # 用于去重
+    # 先执行所有的数据库插入
+    for i in exception_list:
+        i = list(i)
+        print(i)
+        i[1:1] = ['ja3', '']
+        insert_exception_detail(i)
+        seen.add(f"{i[0]}\t{i[1]}\t{i[2]}\t{i[3]}\t{i[4]}")  # 将需要的字符串组合添加到集合中
+
+    # 将去重后的结果拼接成最终字符串
+    ja3_string = '\n'.join(seen)
+
+    if len(ja3_string) > 0:
+        message = f'以下JA3同时多个IP使用，经分析判定为恶意请求，将被封禁\n{ja3_string}\n'
+
+    #新增 waf group
+    # add_rule_to_group(ja3_list)
         
-        # 执行OpenSearch查询
-        result = opensearch_handler.execute_sql_query(query)
-        if not result or len(result.get('datarows', [])) == 0:
-            return '无可疑JA3指纹需要处理'
-            
-        # 获取当前规则组
-        rule_group = waf_handler.get_rule_group()
-        if not rule_group:
-            return 'WAF规则组获取失败'
-            
-        # 提取当前规则
-        current_rules = rule_group['Rules']
-        current_ja3s = set()
-        for rule in current_rules:
-            if rule.get('Statement', {}).get('ByteMatchStatement', {}).get('SearchString'):
-                current_ja3s.add(rule['Statement']['ByteMatchStatement']['SearchString'])
-        
-        # 处理新的JA3指纹
-        new_rules = []
-        message = '检测到以下JA3指纹异常:\n'
-        
-        for row in result['datarows']:
-            ja3 = row[0]  # ja3Fingerprint
-            ip_count = row[1]  # count of distinct IPs
-            
-            if ja3 not in current_ja3s:
-                # 创建新规则
-                rule = {
-                    'Name': f'JA3_{ja3[:8]}',
-                    'Priority': len(current_rules) + len(new_rules) + 1,
-                    'Statement': {
-                        'ByteMatchStatement': {
-                            'FieldToMatch': {
-                                'SingleHeader': {
-                                    'Name': 'ja3-fingerprint'
-                                }
-                            },
-                            'PositionalConstraint': 'EXACTLY',
-                            'SearchString': ja3,
-                            'TextTransformations': [{
-                                'Priority': 1,
-                                'Type': 'NONE'
-                            }]
-                        }
-                    },
-                    'Action': {
-                        'Block': {}
-                    },
-                    'VisibilityConfig': {
-                        'SampledRequestsEnabled': True,
-                        'CloudWatchMetricsEnabled': True,
-                        'MetricName': f'JA3_{ja3[:8]}'
-                    }
-                }
-                new_rules.append(rule)
-                message += f'JA3: {ja3}, 使用IP数: {ip_count}\n'
-                
-                # 记录到MySQL
-                record = {
-                    'ja3': ja3,
-                    'ip_count': ip_count,
-                    'status': 'BLOCKED'
-                }
-                mysql_handler.insert_record('ja3_records', record)
-        
-        if not new_rules:
-            return '无新的可疑JA3指纹需要处理'
-            
-        # 更新规则组
-        all_rules = current_rules + new_rules
-        if waf_handler.update_rule_group(all_rules, rule_group['LockToken']):
-            return message
-        else:
-            return 'WAF规则组更新失败'
-            
-    except Exception as e:
-        print(f"Error in task_execute: {e}")
-        return f'任务执行出错: {str(e)}'
+    # 获取XX时间段内异常ja3
+    ja3_result = get_ja3_exception_list()
+    ja3_list =  [item[0] for item in ja3_result]
+
+    #更新 waf group
+    # add_rule_to_group(ja3_list)
+    update_rule_to_group(ja3_list)
+    return message

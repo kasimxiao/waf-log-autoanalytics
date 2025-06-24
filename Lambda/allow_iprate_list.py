@@ -1,90 +1,124 @@
-import opensearch_handler
-import claude_handler
-import mysql_handler
+from opensearch_handler import querySQL, queryDSL, get_table_name
 import configparser
 import json
+from waf_handler import update_waf_ip_set
+from claude_handler import generate_message
+from mysql_handler import insert_exception_detail
+import ast
+import re
 
-# 读取配置文件
+
+# 读取配置文件 
 def read_config():
     cf = configparser.ConfigParser()
-    cf.read('config.ini', encoding="utf-8")
+    cf.read('config.ini', encoding="utf-8")  # 读取config.ini
     return cf
 
-cf = read_config()
+def query_aos(task_name, parameters=None):
+    """
+    执行OpenSearch查询
+    使用配置文件中的查询语句和类型
+    """
+    cf = read_config()
+    query_string = cf.get(task_name, 'query')
+    query_type = cf.get(task_name, 'type')
+
+    # 替换查询中的table_name变量
+    table_name = get_table_name()
+    query_string = query_string.replace('${table_name}', table_name)
+
+    if task_name == 'allow_request_detail':
+        query_json = json.loads(query_string)
+        for item in query_json['query']['bool']['filter']:
+            if 'terms' in item and 'httpRequest.clientIp' in item['terms']:
+                item['terms']['httpRequest.clientIp'] = parameters
+                break
+        query_string = json.dumps(query_json, indent=2)
+
+    if query_type == 'SQL':
+        result = querySQL(query_string)
+    else:
+        # DSL查询使用配置的table_name
+        result = queryDSL(query_string)
+
+    return result
+
+def process_dsl_results(response):
+    results = []
+    hits = response['hits']['hits']
+    for hit in hits:
+        detail_list = []
+        detail_list.append(hit['_source']['httpRequest']['clientIp'])
+        detail_list.append(hit['_source']['httpRequest']['headers'])
+        detail_list.append(hit['_source']['httpRequest']['args'])
+        detail_list.append(hit['_source']['httpRequest']['uri'])
+        results.append(detail_list)
+    return results
+
+def extract_array(text):
+    # 使用正则表式匹配 '[' 和 ']' 之间的内容（包括嵌套的方括号）
+    pattern = r'\[.*\]'
+    match = re.search(pattern, text, re.DOTALL)  # re.DOTALL 允许匹配换行符
+    if match:
+        return match.group()
+    return ''
 
 def task_excute():
-    try:
-        # 获取高频访问IP
-        query = """
-        SELECT httpRequest.clientIp, ja3Fingerprint, httpRequest.country, count(*) as cnt
-        FROM ${table_name}
-        WHERE action = 'ALLOW'
-        AND timestamp >= date_sub(now(), interval 1 day)
-        GROUP BY httpRequest.clientIp, ja3Fingerprint, httpRequest.country
-        HAVING COUNT(*) > 1000
-        ORDER by cnt Desc
-        LIMIT 10
-        """
+    cf = read_config()
+    task_name = 'allow_iprate_list'
+    message = ''
+    #获取高频请求的ip和ja3
+    highrate_result = query_aos(task_name)
+    ip_list = []
+    for i in highrate_result:
+        ip_list.append(i[0])
+
+    # if len(highrate_result) == 0:
+    #     return message
+
+    task_name = 'allow_request_detail'
+    system_prompt = cf.get(task_name, 'system_prompt')
+    user_prompt = cf.get(task_name, 'user_prompt')
+    detail_result = query_aos(task_name,ip_list)
+
+    #测试代码
+    with open('ip.json') as json_data:
+        detail_result = json.load(json_data)
+    
+    #转化为数组，减小token input
+    detail_list = process_dsl_results(detail_result)
+    user_prompt=f'{user_prompt}/n{detail_result}'
+    # user_message =  {"role": "user", "content": prompt}
+    # assistant_message =  {"role": "assistant", "content": "检测"}
+    # messages = [user_message,assistant_message]
+    # response = generate_message(messages)
+
+    response = generate_message(system_prompt,user_prompt,'检测')
+
+
+    print(response)
+
+    if '巡检正常' in f'巡检{response}':
+        return message
         
-        result = opensearch_handler.execute_sql_query(query)
-        if not result or len(result.get('datarows', [])) == 0:
-            return '无高频访问IP需要分析'
-            
-        message = '检测到以下IP访问频率异常:\n'
-        
-        for row in result['datarows']:
-            ip = row[0]  # clientIp
-            ja3 = row[1]  # ja3Fingerprint
-            country = row[2]  # country
-            count = row[3]  # count
-            
-            # 获取详细请求信息
-            detail_query = f"""
-            SELECT timestamp, httpRequest.uri, httpRequest.headers, httpRequest.args
-            FROM ${{table_name}}
-            WHERE httpRequest.clientIp = '{ip}'
-            AND timestamp >= date_sub(now(), interval 1 day)
-            ORDER BY timestamp DESC
-            LIMIT 50
-            """
-            
-            detail_result = opensearch_handler.execute_sql_query(detail_query)
-            if not detail_result or len(detail_result.get('datarows', [])) == 0:
-                continue
-                
-            # 准备分析内容
-            requests = []
-            for detail in detail_result['datarows']:
-                request = {
-                    'timestamp': detail[0],
-                    'uri': detail[1],
-                    'headers': detail[2],
-                    'args': detail[3]
-                }
-                requests.append(request)
-                
-            # 调用Claude分析
-            system_prompt = "你是一个网络安全专家，请分析以下Web访问日志，判断是否存在异常行为。"
-            user_prompt = f"分析来自IP {ip}（国家：{country}）在过去24小时内的{count}次访问，重点关注：\n1. 访问模式是否正常\n2. 是否存在自动化工具特征\n3. 是否有潜在的安全风险\n4. 建议采取的措施"
-            
-            analysis = claude_handler.analyze_content(system_prompt, user_prompt, json.dumps(requests, indent=2))
-            
-            if analysis:
-                message += f'\nIP: {ip}\n国家: {country}\n访问次数: {count}\nJA3: {ja3}\n分析结果:\n{analysis}\n'
-                
-                # 记录到MySQL
-                record = {
-                    'ip': ip,
-                    'ja3': ja3,
-                    'country': country,
-                    'count': count,
-                    'analysis': analysis,
-                    'status': 'ANALYZED'
-                }
-                mysql_handler.insert_record('ip_analysis', record)
-        
-        return message if message != '检测到以下IP访问频率异常:\n' else '无异常IP访问模式'
-            
-    except Exception as e:
-        print(f"Error in task_execute: {e}")
-        return f'任务执行出错: {str(e)}'
+    # exception_result = response.replace('异常','')
+    exception_result = extract_array(response)
+    print('exception_result')
+    print(exception_result)
+
+    exception_list = eval(exception_result)
+    #写入数据库
+    seen = set()  # 用于去重
+    # 先执行所有的数据库插入
+    for i in exception_list:
+        i = list(i)
+        i[1:1] = ['ip']
+        insert_exception_detail(i)
+        seen.add(f"{i[0]}\t{i[1]}\t{i[2]}\t{i[3]}\t{i[4]}")  # 将需要的字符串组合添加到集合中
+
+    # 将去重后的结果拼接成最终字符串
+    exception_string = '\n'.join(seen)
+    if len(exception_string) > 0:
+        message = f'以下IP存在高频请求，经分析疑似为恶意请求，请进行进一步分析\n{exception_string}\n'
+
+    return message

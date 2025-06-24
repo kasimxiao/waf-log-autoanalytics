@@ -1,73 +1,75 @@
-import opensearch_handler
-import waf_handler
-import mysql_handler
+from opensearch_handler import querySQL, queryDSL, get_table_name
 import configparser
-import json
+import waf_handler
+import ipaddress
 
-# 读取配置文件
+from mysql_handler import (
+    insert_block_history, 
+    insert_new_blockips,
+    update_expire_blockips,
+    get_allblock_ips,
+    close_mysql_connection
+)
+from waf_handler import update_waf_ip_set
+
+# 读取配置文件 
 def read_config():
     cf = configparser.ConfigParser()
-    cf.read('config.ini', encoding="utf-8")
+    cf.read('config.ini', encoding="utf-8")  # 读取config.ini
     return cf
 
-cf = read_config()
+def query_aos(task_name):
+    """
+    执行OpenSearch查询
+    使用配置文件中的查询语句和类型
+    """
+    cf = read_config()
+    query_string = cf.get(task_name, 'query')
+    query_type = cf.get(task_name, 'type')
+    
+    # 替换查询中的table_name变量
+    table_name = get_table_name()
+    query_string = query_string.replace('${table_name}', table_name)
+
+    if query_type == 'SQL':
+        result = querySQL(query_string)
+    else:
+        # DSL查询使用配置的table_name作为index
+        result = queryDSL(query_string)
+
+    return result
 
 def task_excute():
-    try:
-        # 获取配置参数
-        query = cf.get('block_rulues_list', 'query')
-        
-        # 执行OpenSearch查询
-        result = opensearch_handler.execute_sql_query(query)
-        if not result or len(result.get('datarows', [])) == 0:
-            return '无高频访问IP需要处理'
-            
-        # 获取当前IP集合
-        ipset = waf_handler.get_ipset()
-        if not ipset:
-            return 'WAF IP集合获取失败'
-            
-        # 提取当前IP地址列表
-        current_ips = set(ipset['Addresses'])
-        
-        # 处理新的IP地址
-        new_ips = set()
-        message = '检测到以下IP需要加入黑名单:\n'
-        
-        for row in result['datarows']:
-            ip = row[0]  # clientIp
-            ja3 = row[1]  # ja3Fingerprint
-            country = row[2]  # country
-            rule_id = row[3]  # terminatingRuleId
-            location = row[4]  # location
-            count = row[5]  # count
-            
-            if ip not in current_ips:
-                new_ips.add(ip)
-                message += f'IP: {ip}, 国家: {country}, 命中规则: {rule_id}, 位置: {location}, 次数: {count}\n'
-                
-                # 记录到MySQL
-                record = {
-                    'ip': ip,
-                    'ja3': ja3,
-                    'country': country,
-                    'rule_id': rule_id,
-                    'location': location,
-                    'count': count,
-                    'status': 'BLOCKED'
-                }
-                mysql_handler.insert_record('ip_records', record)
-        
-        if not new_ips:
-            return '无新的高频访问IP需要处理'
-            
-        # 更新IP集合
-        all_ips = list(current_ips | new_ips)
-        if waf_handler.update_ipset(all_ips, ipset['LockToken']):
-            return message
-        else:
-            return 'WAF IP集合更新失败'
-            
-    except Exception as e:
-        print(f"Error in task_execute: {e}")
-        return f'任务执行出错: {str(e)}'
+    task_name = 'block_rulues_list'
+    message = ''
+    #获取block后仍然大量请求的ip
+    block_result = query_aos(task_name)
+    print('block_result:')
+    print(block_result)
+
+    ip_string = ''
+    for i in block_result:
+        #log写入mysql block_count_history表
+        insert_block_history(i)
+        #ip写入/更新 mysql block_ip_set表
+        insert_new_blockips(i[0],i[1])
+        print(i[0],i[1])
+        ip_string = f'{ip_string}\n{i[0]}\t{i[3]}'
+
+    #更新waf block ip
+    update_expire_blockips()
+
+    #获取mysql block ip 3天内的被阻止的 ip
+    blockip_list = get_allblock_ips()
+    print(blockip_list)
+
+    #更新waf ip set
+    ip_list = []
+    for i in blockip_list:
+        ip_list.append(i[0]+'/32')
+    update_waf_ip_set(ip_list)
+    
+    if len(ip_string) > 0:
+        message = f'以下IP在Block后仍然产生大量请求，将被接入更名单池进行封禁{ip_string}\n'
+
+    return message
